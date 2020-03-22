@@ -15,12 +15,16 @@ from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from slack_webhook import Slack
 import requests
 import string
 
 from datetime import datetime
 import pickle
 import os.path
+
+# Create an app at https://api.slack.com/apps/ and enable Webhooks, then put URL here
+slack = Slack(url='https://hooks.slack.com/services/XX/YY/ZZ')
 
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -38,8 +42,10 @@ def main():
         spreadsheetId=SPREADSHEET_ID,
         range=HEADER_RANGE
     ).execute().get('values')[0]
-    updates = get_updates(header, sheet)
+    urls = get_urls(header, sheet)
+    updates, is_updated = get_updates(header, sheet, urls)
     write_updates(header, sheet, updates)
+    notify_slack(urls, updates, is_updated)
 
 def get_credentials():
     creds = None
@@ -62,38 +68,43 @@ def get_credentials():
             pickle.dump(creds, token)
     return creds
 
-def get_updates(header, sheet):
+def get_updates(header, sheet, urls):
     """Record when URLs were last updated
     
     prev_contents : dictionary
         Dictionary mapping URL to {'content': string, 'updated': datetime}
     last_updated : list
         List of strings of when URL was last udpated (parallel to URLs list)
+    is_updated : list
+        List of booleans of whether an URL was updated this run (parallel to URLs list)
     """
-    urls = get_urls(header, sheet)
     if os.path.exists('prev_contents.pickle'):
         with open('prev_contents.pickle', 'rb') as prev_contents_f:
             prev_contents = pickle.load(prev_contents_f)
     else:
         prev_contents = {}
     last_updated = []
+    is_updated = []
     curr_contents = {}
     for url in urls:
         if not url:
             last_updated.append([''])
+            is_updated.append([''])
         else:
             curr_content = BeautifulSoup(requests.get(url).content, 'lxml').body.text
             prev_content = prev_contents.get(url)
             if prev_content is None or curr_content != prev_content['content']:
                 url_updated = datetime.utcnow()
+                is_updated.append(True)
             else:
                 url_updated = prev_content['updated']
+                is_updated.append(False)
             curr_contents[url] = {'content': curr_content, 'updated': url_updated}
             last_updated.append([url_updated.strftime("%m/%d/%Y, %H:%M:%S")])
     # Save current contents
     with open('prev_contents.pickle', 'wb') as prev_contents_f:
         pickle.dump(curr_contents, prev_contents_f)
-    return last_updated
+    return last_updated, is_updated
 
 def get_urls(header, sheet):
     # Get list of URLs from sheet
@@ -115,5 +126,14 @@ def write_updates(header, sheet, updates):
         body={'values': updates}
     ).execute()
 
+def notify_slack(urls, updates, is_updated):
+    text = ""
+    for url in urls:
+        row_updated = is_updated.pop(0)
+        timestamp = updates.pop(0)
+        if row_updated:
+            text = text + "Updated at " + str(timestamp[0]) + " " + str(url) + "\n"
+    slack.post(text=text)
+    
 if __name__ == '__main__':
     main()
